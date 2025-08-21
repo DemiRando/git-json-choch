@@ -1,0 +1,3 @@
+backtrader
+pandas
+dukascopy_python
