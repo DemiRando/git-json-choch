@@ -37,6 +37,9 @@ jobs:
           path: ./state
         continue-on-error: true   # OK if no state yet
 
+      - name: Ensure state directory exists
+        run: mkdir -p ./state
+
       - name: Run trading bot
         run: python execution_resumable.py
 
