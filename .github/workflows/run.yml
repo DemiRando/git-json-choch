@@ -5,7 +5,7 @@ on:
     # Every 2 hours on Monday–Friday (UTC)
     - cron: '0 */2 * * 1-5'
 
-  workflow_dispatch:  # Allows manual trigger
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -30,21 +30,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Download state artifacts
-        uses: actions/download-artifact@v4
+      # Try to restore the latest state
+      - name: Restore state cache
+        id: cache-state
+        uses: actions/cache@v4
         with:
-          name: state-files
           path: ./state
-        continue-on-error: true   # OK if no state yet
+          key: state-cache
 
+      # Safety net: if no cache was found, start fresh
       - name: Ensure state directory exists
         run: mkdir -p ./state
+
+      - name: Log cache restore status
+        run: |
+          if [ "${{ steps.cache-state.outputs.cache-hit }}" != "true" ]; then
+            echo "⚠️ No cache found, starting with empty state."
+          else
+            echo "✅ Restored state cache successfully."
+          fi
 
       - name: Run trading bot
         run: python execution_resumable.py
 
-      - name: Upload updated state
-        uses: actions/upload-artifact@v4
+      # Save updated state into the same rolling cache
+      - name: Save state cache
+        if: always()
+        uses: actions/cache/save@v4
         with:
-          name: state-files
           path: ./state
+          key: state-cache
