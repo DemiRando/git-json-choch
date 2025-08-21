@@ -30,7 +30,7 @@ class MasterCHOCHStrategy(bt.Strategy):
 
         for d in self.datas:
             name = d._name
-            state_file = state_path(name)   # ✅ use new helper
+            state_file = state_path(name)
             if os.path.exists(state_file):
                 with open(state_file, 'r') as f:
                     state = json.load(f)
@@ -42,8 +42,10 @@ class MasterCHOCHStrategy(bt.Strategy):
                     'entry_price': None, 'sl': None, 'tp': None, 'is_long': None,
                     'max_favorable': 0.0, 'max_adverse': 0.0,
                     'total_wins': 0, 'total_losses': 0, 'trade_log': [],
-                    'last_alerted_event': None,     # ✅ track last alerted
-                    'latest_event': None            # ✅ track latest candidate
+                    'last_alerted_event': None,
+                    'latest_event': None,
+                    'email_status': None,  # ✅ track email result
+                    'email_error': None    # ✅ store error if send fails
                 }
 
             self.data_ctx[name] = state
@@ -122,8 +124,6 @@ TP: {q['tp']}"""
                     ctx['risk_R'] = abs(q['entry_price'] - q['sl'])
                     self.log(f'TRIGGERED TRADE: {msg}')
                     ctx['latest_event'] = f"TRIGGERED {direction} {pair} at {q['entry_price']}"
-
-                    # ✅ Add padded trade log entry (placeholders for Result, MAE, MFE)
                     ctx['trade_log'].append([
                         str(data.datetime.datetime(0)), f"TRIGGERED {direction}",
                         q['entry_price'], q['sl'], q['tp'], None, None, None, q['rr']
@@ -131,13 +131,10 @@ TP: {q['tp']}"""
                 else:
                     self.log(f'QUEUED TRADE: {msg}')
                     ctx['latest_event'] = f"QUEUED {direction} {pair} at {q['entry_price']}"
-
-                    # ✅ Also log queued trades with placeholders
                     ctx['trade_log'].append([
                         str(data.datetime.datetime(0)), f"QUEUED {direction}",
                         q['entry_price'], q['sl'], q['tp'], None, None, None, q['rr']
                     ])
-
                 ctx['queued_trade'] = None
 
             if ctx['trade_active']:
@@ -195,12 +192,15 @@ TP: {q['tp']}"""
 
     def stop(self):
         for pair, ctx in self.data_ctx.items():
-            # Save state for warm resuming
+            # Save state
             with open(state_path(pair), 'w') as f:
                 json.dump(ctx, f, indent=2)
             print(f"Saved state for {pair} to {state_path(pair)}")
 
-            # ✅ Only send one alert if latest_event is new
+            email_sent = False
+            email_error = None
+
+            # Attempt email if live_mode
             if self.p.live_mode and ctx.get("latest_event"):
                 if ctx["latest_event"] != ctx.get("last_alerted_event"):
                     try:
@@ -211,10 +211,16 @@ TP: {q['tp']}"""
                             self.app_password,
                             self.recipient_email
                         )
-                        print(f"✅ Email sent: {ctx['latest_event']}")
+                        email_sent = True
                         ctx["last_alerted_event"] = ctx["latest_event"]
+                        print(f"✅ Email sent: {ctx['latest_event']}")
                     except Exception as e:
+                        email_error = str(e)
                         print(f"❌ Email failed for {pair}: {e}")
+
+            # Store status for logging in backtest summary
+            ctx['email_status'] = "Sent" if email_sent else "Failed or Skipped"
+            ctx['email_error'] = email_error
 
             if not self.p.live_mode:
                 df = pd.DataFrame(ctx['trade_log'], columns=[
@@ -232,5 +238,11 @@ TP: {q['tp']}"""
                 print(f'Trades: {total}, Wins: {ctx["total_wins"]}, Losses: {ctx["total_losses"]}, Win Rate: {win_rate:.2f}%')
                 print(f'Average Max Drawdown Before Win (R): {avg_mae_winners:.2f}')
                 print(f'Average Max Profit Before Loss (R): {avg_mfe_losers:.2f}')
+                print(f'Email Status: {ctx["email_status"]}')
+                if ctx["email_error"]:
+                    print(f'Email Error: {ctx["email_error"]}')
             else:
                 print("===== LIVE MODE COMPLETE =====")
+                print(f'{pair} Email Status: {ctx["email_status"]}')
+                if ctx["email_error"]:
+                    print(f'{pair} Email Error: {ctx["email_error"]}')
