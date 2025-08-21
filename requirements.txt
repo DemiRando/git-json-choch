@@ -1,3 +1,5 @@
-backtrader
-pandas
-dukascopy_python
+backtrader==1.9.78.123
+btoandav20 @ git+https://github.com/ftomassetti/backtrader-oandav20.git@5a57dfa198e0301a9634e94862f12f29f9666dd5
+pandas==2.2.3
+dukascopy-python==4.0.1
+numpy==2.2.4

@@ -6,6 +6,13 @@ from emailer import send_email
 
 print(">>> NEW STRATEGY VERSION LOADED")
 
+# ✅ Centralized state path (avoids scattered JSONs, no circular import)
+def state_path(pair: str) -> str:
+    state_dir = os.path.join(os.path.dirname(__file__), "state")
+    os.makedirs(state_dir, exist_ok=True)
+    return os.path.join(state_dir, f"{pair}_state.json")
+
+
 class MasterCHOCHStrategy(bt.Strategy):
     params = dict(
         swing_lookback=10,
@@ -23,7 +30,7 @@ class MasterCHOCHStrategy(bt.Strategy):
 
         for d in self.datas:
             name = d._name
-            state_file = f"{name}_state.json"
+            state_file = state_path(name)   # ✅ use new helper
             if os.path.exists(state_file):
                 with open(state_file, 'r') as f:
                     state = json.load(f)
@@ -182,9 +189,9 @@ TP: {q['tp']}"""
     def stop(self):
         for pair, ctx in self.data_ctx.items():
             # Save state for warm resuming
-            with open(f"{pair}_state.json", 'w') as f:
+            with open(state_path(pair), 'w') as f:   # ✅ save in state dir
                 json.dump(ctx, f, indent=2)
-            print(f"Saved state for {pair} to {pair}_state.json")
+            print(f"Saved state for {pair} to {state_path(pair)}")
 
             if not self.p.live_mode:
                 df = pd.DataFrame(ctx['trade_log'], columns=[
