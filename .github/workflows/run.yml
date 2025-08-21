@@ -4,7 +4,6 @@ on:
   schedule:
     # Every 2 hours on Monday–Friday (UTC)
     - cron: '0 */2 * * 1-5'
-
   workflow_dispatch:
 
 jobs:
@@ -30,13 +29,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Try to restore the latest state
+      # Restore the latest available state
       - name: Restore state cache
         id: cache-state
         uses: actions/cache@v4
         with:
           path: ./state
-          key: state-cache
+          key: state-cache-${{ github.run_id }}
+          restore-keys: |
+            state-cache-
 
       # Safety net: if no cache was found, start fresh
       - name: Ensure state directory exists
@@ -53,10 +54,10 @@ jobs:
       - name: Run trading bot
         run: python execution_resumable.py
 
-      # Save updated state into the same rolling cache
+      # Save updated state into unique cache for this run
       - name: Save state cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: ./state
-          key: state-cache
+          key: state-cache-${{ github.run_id }}
