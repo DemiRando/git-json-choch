@@ -30,5 +30,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Download state artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: state-files
+          path: ./state
+        continue-on-error: true   # OK if no state yet
+
       - name: Run trading bot
         run: python execution_resumable.py
+
+      - name: Upload updated state
+        uses: actions/upload-artifact@v4
+        with:
+          name: state-files
+          path: ./state

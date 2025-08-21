@@ -18,7 +18,7 @@ SYMBOLS = {
     'EUR_USD': INSTRUMENT_FX_MAJORS_EUR_USD,
     'AUD_NZD': INSTRUMENT_FX_CROSSES_AUD_NZD,
     'GBP_JPY': INSTRUMENT_FX_CROSSES_GBP_JPY,
-    'LTC_USD':INSTRUMENT_VCCY_LTC_USD
+    'LTC_USD': INSTRUMENT_VCCY_LTC_USD
 }
 TIMEFRAME_MINUTES = 1
 DATE_FORMAT = '%d.%m.%Y %H:%M:%S.%f'
@@ -26,6 +26,9 @@ COLUMN_DATETIME = 'Gmt time'
 
 BOOTSTRAP_START = datetime(2023, 6, 7, tzinfo=UTC)
 BOOTSTRAP_END = datetime(2025, 7, 7, tzinfo=UTC)
+
+STATE_DIR = "state"
+os.makedirs(STATE_DIR, exist_ok=True)
 
 # === CLEAN OLD TEMP FILES BEFORE START ===
 for f in os.listdir('.'):
@@ -37,9 +40,13 @@ for f in os.listdir('.'):
             print(f"Failed to delete {f}: {e}")
 
 # === HELPERS ===
+def state_path(symbol):
+    """Return full path for state file."""
+    return os.path.join(STATE_DIR, f"{symbol}_state.json")
+
 def load_state_last_dt(symbol):
     """Load last trade datetime from state JSON if available."""
-    state_file = f"{symbol}_state.json"
+    state_file = state_path(symbol)
     if not os.path.exists(state_file):
         return None
     try:
