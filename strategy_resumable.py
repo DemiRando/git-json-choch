@@ -41,7 +41,9 @@ class MasterCHOCHStrategy(bt.Strategy):
                     'trade_active': False, 'queued_trade': None,
                     'entry_price': None, 'sl': None, 'tp': None, 'is_long': None,
                     'max_favorable': 0.0, 'max_adverse': 0.0,
-                    'total_wins': 0, 'total_losses': 0, 'trade_log': []
+                    'total_wins': 0, 'total_losses': 0, 'trade_log': [],
+                    'last_alerted_event': None,     # ✅ track last alerted
+                    'latest_event': None            # ✅ track latest candidate
                 }
 
             self.data_ctx[name] = state
@@ -117,20 +119,12 @@ TP: {q['tp']}"""
                         'entry_price': q['entry_price'], 'sl': q['sl'], 'tp': q['tp'], 'is_long': q['is_long'],
                         'max_favorable': 0.0, 'max_adverse': 0.0, 'trade_active': True
                     })
-                    ctx['risk_R'] = abs(q['entry_price'] - q['sl'])  # store risk unit
-                    if self.p.live_mode:
-                        self.log(f'TRIGGERED TRADE ALERT:\n{msg}')
-                        send_email(f"TRADE ALERT: {direction} {pair}", msg,
-                                   self.sender_email, self.app_password, self.recipient_email)
-                    else:
-                        order = self.buy(data=data, price=q['entry_price']) if q['is_long'] else self.sell(data=data, price=q['entry_price'])
-                        ctx['trade_log'].append([str(data.datetime.datetime(0)), direction, q['entry_price'], q['sl'], q['tp'], '', 0, 0, q['rr']])
-                        self.log(f"TRADE EXECUTED: {direction} {pair} at {q['entry_price']}")
+                    ctx['risk_R'] = abs(q['entry_price'] - q['sl'])
+                    self.log(f'TRIGGERED TRADE: {msg}')
+                    ctx['latest_event'] = f"TRIGGERED {direction} {pair} at {q['entry_price']}"
                 else:
-                    if self.show_queued_alerts and self.p.live_mode:
-                        self.log(f'QUEUED TRADE ALERT:\n{msg}')
-                        send_email(f"SETUP QUEUED: {direction} {pair}", msg,
-                                   self.sender_email, self.app_password, self.recipient_email)
+                    self.log(f'QUEUED TRADE: {msg}')
+                    ctx['latest_event'] = f"QUEUED {direction} {pair} at {q['entry_price']}"
 
                 ctx['queued_trade'] = None
 
@@ -140,7 +134,6 @@ TP: {q['tp']}"""
                 ctx['max_favorable'] = max(ctx['max_favorable'], move)
                 ctx['max_adverse'] = max(ctx['max_adverse'], dd)
 
-                # Convert to R units
                 mae_R = ctx['max_adverse'] / ctx['risk_R'] if ctx['risk_R'] else 0
                 mfe_R = ctx['max_favorable'] / ctx['risk_R'] if ctx['risk_R'] else 0
 
@@ -151,6 +144,7 @@ TP: {q['tp']}"""
                         self.close(data=data)
                     ctx['trade_active'] = False
                     self.log(f"{pair} TP HIT")
+                    ctx['latest_event'] = f"TP HIT {pair}"
 
                 elif (ctx['is_long'] and price <= ctx['sl']) or (not ctx['is_long'] and price >= ctx['sl']):
                     ctx['total_losses'] += 1
@@ -159,6 +153,7 @@ TP: {q['tp']}"""
                         self.close(data=data)
                     ctx['trade_active'] = False
                     self.log(f"{pair} SL HIT")
+                    ctx['latest_event'] = f"SL HIT {pair}"
                 continue
 
             # Swing logic (unchanged)
@@ -189,9 +184,16 @@ TP: {q['tp']}"""
     def stop(self):
         for pair, ctx in self.data_ctx.items():
             # Save state for warm resuming
-            with open(state_path(pair), 'w') as f:   # ✅ save in state dir
+            with open(state_path(pair), 'w') as f:
                 json.dump(ctx, f, indent=2)
             print(f"Saved state for {pair} to {state_path(pair)}")
+
+            # ✅ Only send one alert if latest_event is new
+            if self.p.live_mode and ctx.get("latest_event"):
+                if ctx["latest_event"] != ctx.get("last_alerted_event"):
+                    send_email(f"TRADE ALERT {pair}", ctx["latest_event"],
+                               self.sender_email, self.app_password, self.recipient_email)
+                    ctx["last_alerted_event"] = ctx["latest_event"]
 
             if not self.p.live_mode:
                 df = pd.DataFrame(ctx['trade_log'], columns=[
@@ -202,7 +204,6 @@ TP: {q['tp']}"""
                 total = ctx['total_wins'] + ctx['total_losses']
                 win_rate = (ctx['total_wins'] / total * 100) if total else 0
 
-                # Separate averages for winners and losers
                 avg_mae_winners = df.loc[df['Result'] == 'WIN', 'Max Drawdown (R)'].mean() if not df.empty else 0
                 avg_mfe_losers = df.loc[df['Result'] == 'LOSS', 'Max Profit (R)'].mean() if not df.empty else 0
 
