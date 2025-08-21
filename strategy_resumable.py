@@ -203,9 +203,18 @@ TP: {q['tp']}"""
             # ✅ Only send one alert if latest_event is new
             if self.p.live_mode and ctx.get("latest_event"):
                 if ctx["latest_event"] != ctx.get("last_alerted_event"):
-                    send_email(f"TRADE ALERT {pair}", ctx["latest_event"],
-                               self.sender_email, self.app_password, self.recipient_email)
-                    ctx["last_alerted_event"] = ctx["latest_event"]
+                    try:
+                        send_email(
+                            f"TRADE ALERT {pair}",
+                            ctx["latest_event"],
+                            self.sender_email,
+                            self.app_password,
+                            self.recipient_email
+                        )
+                        print(f"✅ Email sent: {ctx['latest_event']}")
+                        ctx["last_alerted_event"] = ctx["latest_event"]
+                    except Exception as e:
+                        print(f"❌ Email failed for {pair}: {e}")
 
             if not self.p.live_mode:
                 df = pd.DataFrame(ctx['trade_log'], columns=[
