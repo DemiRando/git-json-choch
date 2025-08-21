@@ -122,9 +122,21 @@ TP: {q['tp']}"""
                     ctx['risk_R'] = abs(q['entry_price'] - q['sl'])
                     self.log(f'TRIGGERED TRADE: {msg}')
                     ctx['latest_event'] = f"TRIGGERED {direction} {pair} at {q['entry_price']}"
+
+                    # ✅ Add padded trade log entry (placeholders for Result, MAE, MFE)
+                    ctx['trade_log'].append([
+                        str(data.datetime.datetime(0)), f"TRIGGERED {direction}",
+                        q['entry_price'], q['sl'], q['tp'], None, None, None, q['rr']
+                    ])
                 else:
                     self.log(f'QUEUED TRADE: {msg}')
                     ctx['latest_event'] = f"QUEUED {direction} {pair} at {q['entry_price']}"
+
+                    # ✅ Also log queued trades with placeholders
+                    ctx['trade_log'].append([
+                        str(data.datetime.datetime(0)), f"QUEUED {direction}",
+                        q['entry_price'], q['sl'], q['tp'], None, None, None, q['rr']
+                    ])
 
                 ctx['queued_trade'] = None
 
@@ -139,7 +151,7 @@ TP: {q['tp']}"""
 
                 if (ctx['is_long'] and price >= ctx['tp']) or (not ctx['is_long'] and price <= ctx['tp']):
                     ctx['total_wins'] += 1
-                    if not self.p.live_mode:
+                    if not self.p.live_mode and ctx['trade_log']:
                         ctx['trade_log'][-1][5:8] = ['WIN', mae_R, mfe_R]
                         self.close(data=data)
                     ctx['trade_active'] = False
@@ -148,7 +160,7 @@ TP: {q['tp']}"""
 
                 elif (ctx['is_long'] and price <= ctx['sl']) or (not ctx['is_long'] and price >= ctx['sl']):
                     ctx['total_losses'] += 1
-                    if not self.p.live_mode:
+                    if not self.p.live_mode and ctx['trade_log']:
                         ctx['trade_log'][-1][5:8] = ['LOSS', mae_R, mfe_R]
                         self.close(data=data)
                     ctx['trade_active'] = False
