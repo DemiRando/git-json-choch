@@ -35,9 +35,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ./state
-          key: state-cache-${{ github.run_id }}
+          key: state-cache-v2-${{ github.run_id }}
           restore-keys: |
-            state-cache-
+            state-cache-v2-
 
       # Safety net: if no cache was found, start fresh
       - name: Ensure state directory exists
@@ -60,4 +60,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ./state
-          key: state-cache-${{ github.run_id }}
+          key: state-cache-v2-${{ github.run_id }}
