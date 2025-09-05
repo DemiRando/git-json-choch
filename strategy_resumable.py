@@ -6,7 +6,7 @@ from emailer import send_email
 
 print(">>> NEW STRATEGY VERSION LOADED")
 
-# ✅ Centralized state path (avoids scattered JSONs, no circular import)
+# ✅ Centralized state path (avoids scattered JSONs)
 def state_path(pair: str) -> str:
     state_dir = os.path.join(os.path.dirname(__file__), "state")
     os.makedirs(state_dir, exist_ok=True)
@@ -44,13 +44,14 @@ class MasterCHOCHStrategy(bt.Strategy):
                     'total_wins': 0, 'total_losses': 0, 'trade_log': [],
                     'last_alerted_event': None,
                     'latest_event': None,
-                    'email_status': None,  # ✅ track email result
-                    'email_error': None    # ✅ store error if send fails
+                    'email_status': None,
+                    'email_error': None,
+                    'last_triggered_trade': None  # ✅ track last triggered trade
                 }
 
             self.data_ctx[name] = state
 
-        # ✅ Use GitHub Secrets via environment variables
+        # ✅ Use env vars for secrets
         self.sender_email = os.getenv("EMAIL_USER")
         self.app_password = os.getenv("EMAIL_PASS")
         self.recipient_email = os.getenv("EMAIL_TO")
@@ -61,11 +62,13 @@ class MasterCHOCHStrategy(bt.Strategy):
 
     def detect_swings_buffered(self, data, ctx):
         lb = self.p.swing_lookback
-        if len(data) < (2 * lb + 1): return
+        if len(data) < (2 * lb + 1):
+            return
 
         highs = list(data.high.get(size=2 * lb + 1))
         lows = list(data.low.get(size=2 * lb + 1))
-        if len(highs) != 2 * lb + 1: return
+        if len(highs) != 2 * lb + 1:
+            return
 
         center_high, center_low = highs[lb], lows[lb]
         is_high = all(center_high > h for i, h in enumerate(highs) if i != lb)
@@ -74,15 +77,23 @@ class MasterCHOCHStrategy(bt.Strategy):
         time = data.datetime.datetime(-lb)
 
         if is_high:
-            ctx['pending_swings'].append({'type': 'high', 'center_price': center_high, 'center_time': str(time), 'future_bars': []})
+            ctx['pending_swings'].append({
+                'type': 'high', 'center_price': center_high,
+                'center_time': str(time), 'future_bars': []
+            })
         if is_low:
-            ctx['pending_swings'].append({'type': 'low', 'center_price': center_low, 'center_time': str(time), 'future_bars': []})
+            ctx['pending_swings'].append({
+                'type': 'low', 'center_price': center_low,
+                'center_time': str(time), 'future_bars': []
+            })
 
         updated = []
         for swing in ctx['pending_swings']:
             curr = data.high[0] if swing['type'] == 'high' else data.low[0]
-            if swing['type'] == 'high' and curr > swing['center_price']: continue
-            if swing['type'] == 'low' and curr < swing['center_price']: continue
+            if swing['type'] == 'high' and curr > swing['center_price']:
+                continue
+            if swing['type'] == 'low' and curr < swing['center_price']:
+                continue
 
             swing['future_bars'].append(curr)
             if len(swing['future_bars']) >= lb:
@@ -118,23 +129,40 @@ TP: {q['tp']}"""
 
                 if valid:
                     ctx.update({
-                        'entry_price': q['entry_price'], 'sl': q['sl'], 'tp': q['tp'], 'is_long': q['is_long'],
-                        'max_favorable': 0.0, 'max_adverse': 0.0, 'trade_active': True
+                        'entry_price': q['entry_price'], 'sl': q['sl'], 'tp': q['tp'],
+                        'is_long': q['is_long'], 'max_favorable': 0.0,
+                        'max_adverse': 0.0, 'trade_active': True
                     })
                     ctx['risk_R'] = abs(q['entry_price'] - q['sl'])
-                    self.log(f'TRIGGERED TRADE: {msg}')
                     ctx['latest_event'] = f"TRIGGERED {direction} {pair} at {q['entry_price']}"
-                    ctx['trade_log'].append([
-                        str(data.datetime.datetime(0)), f"TRIGGERED {direction}",
-                        q['entry_price'], q['sl'], q['tp'], None, None, None, q['rr']
-                    ])
+
+                    ctx['last_triggered_trade'] = {
+                        'entry': q['entry_price'], 'sl': q['sl'], 'tp': q['tp'],
+                        'direction': direction, 'status': 'ONGOING'
+                    }
+
+                    if self.p.live_mode:
+                        self.log(f'TRIGGERED TRADE ALERT:\n{msg}')
+                        send_email(
+                            f"TRADE ALERT: {direction} {pair}", msg,
+                            self.sender_email, self.app_password, self.recipient_email
+                        )
+                    else:
+                        order = self.buy(data=data, price=q['entry_price']) if q['is_long'] else self.sell(data=data, price=q['entry_price'])
+                        ctx['trade_log'].append([
+                            str(data.datetime.datetime(0)), direction,
+                            q['entry_price'], q['sl'], q['tp'], '', 0, 0, q['rr']
+                        ])
+                        self.log(f"TRADE EXECUTED: {direction} {pair} at {q['entry_price']}")
                 else:
-                    self.log(f'QUEUED TRADE: {msg}')
+                    if self.show_queued_alerts and self.p.live_mode:
+                        self.log(f'QUEUED TRADE ALERT:\n{msg}')
+                        send_email(
+                            f"SETUP QUEUED: {direction} {pair}", msg,
+                            self.sender_email, self.app_password, self.recipient_email
+                        )
                     ctx['latest_event'] = f"QUEUED {direction} {pair} at {q['entry_price']}"
-                    ctx['trade_log'].append([
-                        str(data.datetime.datetime(0)), f"QUEUED {direction}",
-                        q['entry_price'], q['sl'], q['tp'], None, None, None, q['rr']
-                    ])
+
                 ctx['queued_trade'] = None
 
             if ctx['trade_active']:
@@ -148,21 +176,25 @@ TP: {q['tp']}"""
 
                 if (ctx['is_long'] and price >= ctx['tp']) or (not ctx['is_long'] and price <= ctx['tp']):
                     ctx['total_wins'] += 1
-                    if not self.p.live_mode and ctx['trade_log']:
+                    if not self.p.live_mode:
                         ctx['trade_log'][-1][5:8] = ['WIN', mae_R, mfe_R]
                         self.close(data=data)
                     ctx['trade_active'] = False
-                    self.log(f"{pair} TP HIT")
                     ctx['latest_event'] = f"TP HIT {pair}"
+                    if ctx['last_triggered_trade']:
+                        ctx['last_triggered_trade']['status'] = 'WIN'
+                    self.log(f"{pair} TP HIT")
 
                 elif (ctx['is_long'] and price <= ctx['sl']) or (not ctx['is_long'] and price >= ctx['sl']):
                     ctx['total_losses'] += 1
-                    if not self.p.live_mode and ctx['trade_log']:
+                    if not self.p.live_mode:
                         ctx['trade_log'][-1][5:8] = ['LOSS', mae_R, mfe_R]
                         self.close(data=data)
                     ctx['trade_active'] = False
-                    self.log(f"{pair} SL HIT")
                     ctx['latest_event'] = f"SL HIT {pair}"
+                    if ctx['last_triggered_trade']:
+                        ctx['last_triggered_trade']['status'] = 'LOSS'
+                    self.log(f"{pair} SL HIT")
                 continue
 
             # Swing logic (unchanged)
@@ -174,7 +206,8 @@ TP: {q['tp']}"""
 
                 if h1 > h0 and price > h1:
                     raw_sl, raw_risk = l1, price - l1
-                    if raw_risk < 1e-6: return
+                    if raw_risk < 1e-6:
+                        return
                     entry_shift = raw_risk * self.p.entry_shift_ratio if self.p.use_entry_shift else 0
                     entry, sl, tp = price - entry_shift, price + raw_risk, l1
                     rr = abs(tp - entry) / abs(entry - sl)
@@ -183,7 +216,8 @@ TP: {q['tp']}"""
 
                 elif l1 < l0 and price < l1:
                     raw_sl, raw_risk = h1, h1 - price
-                    if raw_risk < 1e-6: return
+                    if raw_risk < 1e-6:
+                        return
                     entry_shift = raw_risk * self.p.entry_shift_ratio if self.p.use_entry_shift else 0
                     entry, sl, tp = price + entry_shift, price - raw_risk, h1
                     rr = abs(tp - entry) / abs(entry - sl)
@@ -192,7 +226,6 @@ TP: {q['tp']}"""
 
     def stop(self):
         for pair, ctx in self.data_ctx.items():
-            # Save state
             with open(state_path(pair), 'w') as f:
                 json.dump(ctx, f, indent=2)
             print(f"Saved state for {pair} to {state_path(pair)}")
@@ -200,7 +233,6 @@ TP: {q['tp']}"""
             email_sent = False
             email_error = None
 
-            # Attempt email if live_mode
             if self.p.live_mode and ctx.get("latest_event"):
                 if ctx["latest_event"] != ctx.get("last_alerted_event"):
                     try:
@@ -218,7 +250,6 @@ TP: {q['tp']}"""
                         email_error = str(e)
                         print(f"❌ Email failed for {pair}: {e}")
 
-            # Store status for logging in backtest summary
             ctx['email_status'] = "Sent" if email_sent else "Failed or Skipped"
             ctx['email_error'] = email_error
 
@@ -241,6 +272,15 @@ TP: {q['tp']}"""
                 print(f'Email Status: {ctx["email_status"]}')
                 if ctx["email_error"]:
                     print(f'Email Error: {ctx["email_error"]}')
+
+                # ✅ Print last triggered trade snapshot
+                if ctx['last_triggered_trade']:
+                    t = ctx['last_triggered_trade']
+                    print("-- Last Triggered Trade --")
+                    print(f"Direction: {t['direction']}")
+                    print(f"Entry: {t['entry']} | SL: {t['sl']} | TP: {t['tp']}")
+                    print(f"Status: {t['status']}")
+
             else:
                 print("===== LIVE MODE COMPLETE =====")
                 print(f'{pair} Email Status: {ctx["email_status"]}')
