@@ -266,14 +266,14 @@ TP: {q['tp']}"""
                 avg_mae_winners = df.loc[df['Result'] == 'WIN', 'Max Drawdown (R)'].mean() if not df.empty else 0
                 avg_mfe_losers = df.loc[df['Result'] == 'LOSS', 'Max Profit (R)'].mean() if not df.empty else 0
 
-                # ✅ New clean format
+                # ✅ New clean format (patched for backward compatibility)
                 print(f'\n== {pair} BACKTEST SUMMARY ==')
                 if ctx['last_triggered_trade']:
                     t = ctx['last_triggered_trade']
-                    print(f"Status: {t['status']}")
-                    print(f"Direction: {t['direction']}")
-                    print(f"Entry: {t['entry']} | SL: {t['sl']} | TP: {t['tp']}")
-                    print(f"Date: {t['date']}")
+                    print(f"Status: {t.get('status', 'N/A')}")
+                    print(f"Direction: {t.get('direction', 'N/A')}")
+                    print(f"Entry: {t.get('entry')} | SL: {t.get('sl')} | TP: {t.get('tp')}")
+                    print(f"Date: {t.get('date', '(not recorded)')}")
                 else:
                     print("No triggered trades in this run.")
                 print(f"Trades: {total}, Wins: {ctx['total_wins']}, Losses: {ctx['total_losses']}, Win Rate: {win_rate:.2f}%")
