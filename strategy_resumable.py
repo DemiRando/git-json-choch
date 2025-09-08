@@ -138,7 +138,8 @@ TP: {q['tp']}"""
 
                     ctx['last_triggered_trade'] = {
                         'entry': q['entry_price'], 'sl': q['sl'], 'tp': q['tp'],
-                        'direction': direction, 'status': 'ONGOING'
+                        'direction': direction, 'status': 'ONGOING',
+                        'date': str(data.datetime.datetime(0))  # ✅ capture date
                     }
 
                     if self.p.live_mode:
@@ -265,21 +266,22 @@ TP: {q['tp']}"""
                 avg_mae_winners = df.loc[df['Result'] == 'WIN', 'Max Drawdown (R)'].mean() if not df.empty else 0
                 avg_mfe_losers = df.loc[df['Result'] == 'LOSS', 'Max Profit (R)'].mean() if not df.empty else 0
 
+                # ✅ New clean format
                 print(f'\n== {pair} BACKTEST SUMMARY ==')
-                print(f'Trades: {total}, Wins: {ctx["total_wins"]}, Losses: {ctx["total_losses"]}, Win Rate: {win_rate:.2f}%')
-                print(f'Average Max Drawdown Before Win (R): {avg_mae_winners:.2f}')
-                print(f'Average Max Profit Before Loss (R): {avg_mfe_losers:.2f}')
-                print(f'Email Status: {ctx["email_status"]}')
-                if ctx["email_error"]:
-                    print(f'Email Error: {ctx["email_error"]}')
-
-                # ✅ Print last triggered trade snapshot
                 if ctx['last_triggered_trade']:
                     t = ctx['last_triggered_trade']
-                    print("-- Last Triggered Trade --")
+                    print(f"Status: {t['status']}")
                     print(f"Direction: {t['direction']}")
                     print(f"Entry: {t['entry']} | SL: {t['sl']} | TP: {t['tp']}")
-                    print(f"Status: {t['status']}")
+                    print(f"Date: {t['date']}")
+                else:
+                    print("No triggered trades in this run.")
+                print(f"Trades: {total}, Wins: {ctx['total_wins']}, Losses: {ctx['total_losses']}, Win Rate: {win_rate:.2f}%")
+                print(f"Average Max Drawdown Before Win (R): {avg_mae_winners:.2f}")
+                print(f"Average Max Profit Before Loss (R): {avg_mfe_losers:.2f}")
+                print(f"Email Status: {ctx['email_status']}")
+                if ctx["email_error"]:
+                    print(f"Email Error: {ctx['email_error']}")
 
             else:
                 print("===== LIVE MODE COMPLETE =====")
