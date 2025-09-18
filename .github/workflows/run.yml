@@ -2,7 +2,7 @@ name: Run Forex Bot
 
 on:
   schedule:
-    # Every 2 hours on Monday–Friday (UTC)
+    # Every 2 hours from 06:00 to 22:00 (UTC), Mon–Fri
     - cron: '0 6-22/2 * * 1-5'
   workflow_dispatch:
 
@@ -35,9 +35,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ./state
-          key: state-cache-v2-${{ github.run_id }}
+          key: state-cache-v4-${{ github.run_id }}
           restore-keys: |
-            state-cache-v2-
+            state-cache-v4-
 
       # Safety net: if no cache was found, start fresh
       - name: Ensure state directory exists
@@ -60,4 +60,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ./state
-          key: state-cache-v3-${{ github.run_id }}
+          key: state-cache-v4-${{ github.run_id }}
