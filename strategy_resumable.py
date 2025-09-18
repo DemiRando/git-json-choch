@@ -6,7 +6,7 @@ from emailer import send_email
 
 print(">>> NEW STRATEGY VERSION LOADED")
 
-# ✅ Centralized state path (avoids scattered JSONs)
+# Centralized state path (keeps Github workflow & cache intact)
 def state_path(pair: str) -> str:
     state_dir = os.path.join(os.path.dirname(__file__), "state")
     os.makedirs(state_dir, exist_ok=True)
@@ -15,12 +15,26 @@ def state_path(pair: str) -> str:
 
 class MasterCHOCHStrategy(bt.Strategy):
     params = dict(
+        # swing / zone logic
         swing_lookback=10,
-        risk_reward=1.0,
+
+        # risk settings
+        risk_reward=0.5,          # from local: honoured in TP calculation
         use_entry_shift=True,
         entry_shift_ratio=0,
+
+        # logging / mode
         log_filename='trade_log.csv',
-        live_mode=True
+        live_mode=True,          # keep local default; GitHub workflow env will control runtime
+
+        # === General entry filters (from local analysis) ===
+        rsi_min=40.0,             # skip if RSI < 40 (any side)
+        atr_norm_max=0.025,       # skip if ATR_norm > 0.025 (any side)
+        macd_norm_min=0.0,        # skip if MACD_norm < 0 (any side)
+
+        # === Side-specific refinements ===
+        rsi_min_buy=55.0,         # buys require RSI >= 55
+        rsi_min_sell=45.0,        # sells require RSI >= 45
     )
 
     def __init__(self):
@@ -28,8 +42,12 @@ class MasterCHOCHStrategy(bt.Strategy):
         self.show_queued_alerts = True
         self.data_ctx = {}
 
+        # --- indicators per data feed (keeps richer entry-filter logic) ---
+        self.inds = {}
         for d in self.datas:
             name = d._name
+
+            # restore or create state using centralized state path
             state_file = state_path(name)
             if os.path.exists(state_file):
                 with open(state_file, 'r') as f:
@@ -46,12 +64,24 @@ class MasterCHOCHStrategy(bt.Strategy):
                     'latest_event': None,
                     'email_status': None,
                     'email_error': None,
-                    'last_triggered_trade': None  # ✅ track last triggered trade
+                    'last_triggered_trade': None
                 }
+
+            # attach indicators for the feed (mirrors local logic)
+            self.inds[d] = dict(
+                sma50=bt.indicators.SMA(d.close, period=50),
+                sma200=bt.indicators.SMA(d.close, period=200),
+                ema20=bt.indicators.EMA(d.close, period=20),
+                rsi=bt.indicators.RSI(d.close, period=14),
+                macd=bt.indicators.MACD(d.close),
+                atr=bt.indicators.ATR(d, period=14),
+                bb=bt.indicators.BollingerBands(d.close, period=20, devfactor=2),
+                adx=bt.indicators.ADX(d, period=14),
+            )
 
             self.data_ctx[name] = state
 
-        # ✅ Use env vars for secrets
+        # Keep using environment variables for secrets (do NOT hardcode)
         self.sender_email = os.getenv("EMAIL_USER")
         self.app_password = os.getenv("EMAIL_PASS")
         self.recipient_email = os.getenv("EMAIL_TO")
@@ -77,15 +107,9 @@ class MasterCHOCHStrategy(bt.Strategy):
         time = data.datetime.datetime(-lb)
 
         if is_high:
-            ctx['pending_swings'].append({
-                'type': 'high', 'center_price': center_high,
-                'center_time': str(time), 'future_bars': []
-            })
+            ctx['pending_swings'].append({'type': 'high', 'center_price': center_high, 'center_time': str(time), 'future_bars': []})
         if is_low:
-            ctx['pending_swings'].append({
-                'type': 'low', 'center_price': center_low,
-                'center_time': str(time), 'future_bars': []
-            })
+            ctx['pending_swings'].append({'type': 'low', 'center_price': center_low, 'center_time': str(time), 'future_bars': []})
 
         updated = []
         for swing in ctx['pending_swings']:
@@ -106,6 +130,71 @@ class MasterCHOCHStrategy(bt.Strategy):
                 updated.append(swing)
 
         ctx['pending_swings'] = updated
+
+    def capture_indicators(self, data):
+        """Return normalized indicator snapshot for a given data feed.
+
+        Normalizations:
+          - ATR normalized by close price (atr / price)
+          - MACD and MACD signal normalized by close price
+          - BB %B (between 0 and 1): (close - lower) / (upper - lower)
+          - RSI left as-is (0-100)
+        """
+        i = self.inds[data]
+        close = float(data.close[0]) if data.close[0] is not None else 0.0
+
+        # raw pulls (some indicators may be NaN at startup)
+        rsi_v = float(i['rsi'][0]) if i['rsi'][0] is not None else float('nan')
+        atr_v = float(i['atr'][0]) if i['atr'][0] is not None else float('nan')
+        macd_v = float(i['macd'].macd[0]) if i['macd'].macd[0] is not None else float('nan')
+        macdsig_v = float(i['macd'].signal[0]) if i['macd'].signal[0] is not None else float('nan')
+
+        # bollinger bands
+        try:
+            bb_top = float(i['bb'].top[0])
+            bb_bot = float(i['bb'].bot[0])
+        except Exception:
+            bb_top, bb_bot = float('nan'), float('nan')
+
+        # normalize safely (avoid division by zero)
+        atr_norm = (atr_v / close) if close and pd.notna(atr_v) else float('nan')
+        macd_norm = (macd_v / close) if close and pd.notna(macd_v) else float('nan')
+        macdsig_norm = (macdsig_v / close) if close and pd.notna(macdsig_v) else float('nan')
+
+        bbp = float('nan')
+        if pd.notna(bb_top) and pd.notna(bb_bot) and (bb_top - bb_bot) != 0:
+            bbp = (close - bb_bot) / (bb_top - bb_bot)
+
+        return dict(
+            rsi=rsi_v,
+            atr_norm=atr_norm,
+            macd_norm=macd_norm,
+            macdsig_norm=macdsig_norm,
+            bbp=bbp
+        )
+
+    def _passes_entry_filters(self, ind_vals, is_long):
+        # Any NaN critical indicator -> reject (conservative)
+        if not pd.notna(ind_vals['rsi']) or not pd.notna(ind_vals['atr_norm']) or not pd.notna(ind_vals['macd_norm']):
+            return False, f"INDICATOR_NAN rsi={ind_vals['rsi']}, atr_norm={ind_vals['atr_norm']}, macd_norm={ind_vals['macd_norm']}"
+
+        # General filters
+        if ind_vals['rsi'] < self.p.rsi_min:
+            return False, f"RSI<{self.p.rsi_min} (rsi={ind_vals['rsi']:.2f})"
+        if ind_vals['atr_norm'] > self.p.atr_norm_max:
+            return False, f"ATR_norm>{self.p.atr_norm_max} (atr_norm={ind_vals['atr_norm']:.5f})"
+        if ind_vals['macd_norm'] < self.p.macd_norm_min:
+            return False, f"MACD_norm<{self.p.macd_norm_min} (macd_norm={ind_vals['macd_norm']:.8f})"
+
+        # Side-specific refinements
+        if is_long:
+            if ind_vals['rsi'] < self.p.rsi_min_buy:
+                return False, f"BUY: RSI<{self.p.rsi_min_buy} (rsi={ind_vals['rsi']:.2f})"
+        else:
+            if ind_vals['rsi'] < self.p.rsi_min_sell:
+                return False, f"SELL: RSI<{self.p.rsi_min_sell} (rsi={ind_vals['rsi']:.2f})"
+
+        return True, "OK"
 
     def next(self):
         for data in self.datas:
@@ -129,40 +218,39 @@ TP: {q['tp']}"""
 
                 if valid:
                     ctx.update({
-                        'entry_price': q['entry_price'], 'sl': q['sl'], 'tp': q['tp'],
-                        'is_long': q['is_long'], 'max_favorable': 0.0,
-                        'max_adverse': 0.0, 'trade_active': True
+                        'entry_price': q['entry_price'], 'sl': q['sl'], 'tp': q['tp'], 'is_long': q['is_long'],
+                        'max_favorable': 0.0, 'max_adverse': 0.0, 'trade_active': True
                     })
-                    ctx['risk_R'] = abs(q['entry_price'] - q['sl'])
-                    ctx['latest_event'] = f"TRIGGERED {direction} {pair} at {q['entry_price']}"
+                    ctx['risk_R'] = abs(q['entry_price'] - q['sl'])  # store risk unit
 
-                    ctx['last_triggered_trade'] = {
-                        'entry': q['entry_price'], 'sl': q['sl'], 'tp': q['tp'],
-                        'direction': direction, 'status': 'ONGOING',
-                        'date': str(data.datetime.datetime(0))  # ✅ capture date
-                    }
+                    # snapshot normalized indicators at entry
+                    ind_vals = self.capture_indicators(data)
 
                     if self.p.live_mode:
                         self.log(f'TRIGGERED TRADE ALERT:\n{msg}')
-                        send_email(
-                            f"TRADE ALERT: {direction} {pair}", msg,
-                            self.sender_email, self.app_password, self.recipient_email
-                        )
+                        send_email(f"TRADE ALERT: {direction} {pair}", msg,
+                                   self.sender_email, self.app_password, self.recipient_email)
                     else:
                         order = self.buy(data=data, price=q['entry_price']) if q['is_long'] else self.sell(data=data, price=q['entry_price'])
-                        ctx['trade_log'].append([
-                            str(data.datetime.datetime(0)), direction,
-                            q['entry_price'], q['sl'], q['tp'], '', 0, 0, q['rr']
-                        ])
+                        # append single-row log with entry indicators and placeholders for exit
+                        row = [
+                            str(data.datetime.datetime(0)),  # time_entry
+                            '',                                # time_exit (fill at exit)
+                            direction,                         # Action
+                            q['entry_price'], q['sl'], q['tp'], q['rr'],  # entry, sl, tp, rr
+                            '',                                # Result (WIN/LOSS) to be set at exit
+                            0, 0,                              # Max Drawdown (R), Max Profit (R)
+                            '',                                # pnl (optional)
+                            ind_vals['rsi'], ind_vals['atr_norm'], ind_vals['macd_norm'], ind_vals['macdsig_norm'], ind_vals['bbp'],
+                            '', '', '', '', ''                 # placeholders for exit indicators (indices 16-20)
+                        ]
+                        ctx['trade_log'].append(row)
                         self.log(f"TRADE EXECUTED: {direction} {pair} at {q['entry_price']}")
                 else:
                     if self.show_queued_alerts and self.p.live_mode:
                         self.log(f'QUEUED TRADE ALERT:\n{msg}')
-                        send_email(
-                            f"SETUP QUEUED: {direction} {pair}", msg,
-                            self.sender_email, self.app_password, self.recipient_email
-                        )
-                    ctx['latest_event'] = f"QUEUED {direction} {pair} at {q['entry_price']}"
+                        send_email(f"SETUP QUEUED: {direction} {pair}", msg,
+                                   self.sender_email, self.app_password, self.recipient_email)
 
                 ctx['queued_trade'] = None
 
@@ -175,55 +263,85 @@ TP: {q['tp']}"""
                 mae_R = ctx['max_adverse'] / ctx['risk_R'] if ctx['risk_R'] else 0
                 mfe_R = ctx['max_favorable'] / ctx['risk_R'] if ctx['risk_R'] else 0
 
+                # TP hit
                 if (ctx['is_long'] and price >= ctx['tp']) or (not ctx['is_long'] and price <= ctx['tp']):
                     ctx['total_wins'] += 1
                     if not self.p.live_mode:
-                        ctx['trade_log'][-1][5:8] = ['WIN', mae_R, mfe_R]
+                        ind_vals = self.capture_indicators(data)  # snapshot indicators at exit
+                        # update last trade row with exit time, result and MAE/MFE and exit indicators
+                        if ctx['trade_log']:
+                            ctx['trade_log'][-1][1] = str(data.datetime.datetime(0))            # time_exit
+                            ctx['trade_log'][-1][7:10] = ['WIN', mae_R, mfe_R]                # Result, MAE, MFE
+                            ctx['trade_log'][-1][16:21] = [                                   # exit indicators
+                                ind_vals['rsi'], ind_vals['atr_norm'], ind_vals['macd_norm'],
+                                ind_vals['macdsig_norm'], ind_vals['bbp']
+                            ]
                         self.close(data=data)
                     ctx['trade_active'] = False
-                    ctx['latest_event'] = f"TP HIT {pair}"
-                    if ctx['last_triggered_trade']:
-                        ctx['last_triggered_trade']['status'] = 'WIN'
                     self.log(f"{pair} TP HIT")
 
+                # SL hit
                 elif (ctx['is_long'] and price <= ctx['sl']) or (not ctx['is_long'] and price >= ctx['sl']):
                     ctx['total_losses'] += 1
                     if not self.p.live_mode:
-                        ctx['trade_log'][-1][5:8] = ['LOSS', mae_R, mfe_R]
+                        ind_vals = self.capture_indicators(data)  # snapshot indicators at exit
+                        if ctx['trade_log']:
+                            ctx['trade_log'][-1][1] = str(data.datetime.datetime(0))            # time_exit
+                            ctx['trade_log'][-1][7:10] = ['LOSS', mae_R, mfe_R]               # Result, MAE, MFE
+                            ctx['trade_log'][-1][16:21] = [                                   # exit indicators
+                                ind_vals['rsi'], ind_vals['atr_norm'], ind_vals['macd_norm'],
+                                ind_vals['macdsig_norm'], ind_vals['bbp']
+                            ]
                         self.close(data=data)
                     ctx['trade_active'] = False
-                    ctx['latest_event'] = f"SL HIT {pair}"
-                    if ctx['last_triggered_trade']:
-                        ctx['last_triggered_trade']['status'] = 'LOSS'
                     self.log(f"{pair} SL HIT")
                 continue
 
-            # Swing logic (unchanged)
+            # --- Swing-based trade queuing (preserves local risk_reward behavior and filters) ---
             if len(ctx['highs']) >= 2 and len(ctx['lows']) >= 2:
                 h1_time, h1 = ctx['highs'][-1]
                 h0_time, h0 = ctx['highs'][-2]
                 l1_time, l1 = ctx['lows'][-1]
                 l0_time, l0 = ctx['lows'][-2]
 
+                # evaluate filters BEFORE queuing trade (side-aware)
+                ind_vals_now = self.capture_indicators(data)
+
                 if h1 > h0 and price > h1:
-                    raw_sl, raw_risk = l1, price - l1
-                    if raw_risk < 1e-6:
-                        return
-                    entry_shift = raw_risk * self.p.entry_shift_ratio if self.p.use_entry_shift else 0
-                    entry, sl, tp = price - entry_shift, price + raw_risk, l1
-                    rr = abs(tp - entry) / abs(entry - sl)
-                    ctx['queued_trade'] = dict(entry_price=entry, sl=sl, tp=tp, is_long=False, rr=rr)
-                    self.log(f"{pair} QUEUED INVERTED SELL")
+                    # Inverted SELL (use side-specific filters)
+                    passes, reason = self._passes_entry_filters(ind_vals_now, is_long=False)
+                    if not passes:
+                        self.log(f"{pair} SKIP SELL (filters): {reason}")
+                    else:
+                        raw_sl, raw_risk = l1, price - l1
+                        if raw_risk < 1e-6: 
+                            return
+                        entry_shift = raw_risk * self.p.entry_shift_ratio if self.p.use_entry_shift else 0
+                        entry = price - entry_shift
+                        sl = price + raw_risk
+                        risk_dist = abs(entry - sl)
+                        tp = entry - (risk_dist * self.p.risk_reward)
+                        rr = abs(tp - entry) / risk_dist if risk_dist > 0 else 0.0
+                        ctx['queued_trade'] = dict(entry_price=entry, sl=sl, tp=tp, is_long=False, rr=rr)
+                        self.log(f"{pair} QUEUED INVERTED SELL -> entry={entry}, sl={sl}, tp={tp}, rr={rr:.3f}")
 
                 elif l1 < l0 and price < l1:
-                    raw_sl, raw_risk = h1, h1 - price
-                    if raw_risk < 1e-6:
-                        return
-                    entry_shift = raw_risk * self.p.entry_shift_ratio if self.p.use_entry_shift else 0
-                    entry, sl, tp = price + entry_shift, price - raw_risk, h1
-                    rr = abs(tp - entry) / abs(entry - sl)
-                    ctx['queued_trade'] = dict(entry_price=entry, sl=sl, tp=tp, is_long=True, rr=rr)
-                    self.log(f"{pair} QUEUED INVERTED BUY")
+                    # Inverted BUY
+                    passes, reason = self._passes_entry_filters(ind_vals_now, is_long=True)
+                    if not passes:
+                        self.log(f"{pair} SKIP BUY (filters): {reason}")
+                    else:
+                        raw_sl, raw_risk = h1, h1 - price
+                        if raw_risk < 1e-6: 
+                            return
+                        entry_shift = raw_risk * self.p.entry_shift_ratio if self.p.use_entry_shift else 0
+                        entry = price + entry_shift
+                        sl = price - raw_risk
+                        risk_dist = abs(entry - sl)
+                        tp = entry + (risk_dist * self.p.risk_reward)
+                        rr = abs(tp - entry) / risk_dist if risk_dist > 0 else 0.0
+                        ctx['queued_trade'] = dict(entry_price=entry, sl=sl, tp=tp, is_long=True, rr=rr)
+                        self.log(f"{pair} QUEUED INVERTED BUY  -> entry={entry}, sl={sl}, tp={tp}, rr={rr:.3f}")
 
     def stop(self):
         for pair, ctx in self.data_ctx.items():
@@ -231,6 +349,7 @@ TP: {q['tp']}"""
                 json.dump(ctx, f, indent=2)
             print(f"Saved state for {pair} to {state_path(pair)}")
 
+            # email logic kept: only send on latest_event difference
             email_sent = False
             email_error = None
 
@@ -255,18 +374,20 @@ TP: {q['tp']}"""
             ctx['email_error'] = email_error
 
             if not self.p.live_mode:
+                # write full CSV with richer header (backwards-compatible with Github format)
                 df = pd.DataFrame(ctx['trade_log'], columns=[
-                    'Datetime', 'Action', 'Entry', 'SL', 'TP', 'Result',
-                    'Max Drawdown (R)', 'Max Profit (R)', 'RR'])
+                    'time_entry', 'time_exit', 'Action', 'Entry', 'SL', 'TP', 'RR',
+                    'Result', 'Max Drawdown (R)', 'Max Profit (R)', 'pnl',
+                    'RSI_entry', 'ATR_entry_norm', 'MACD_entry_norm', 'MACDsig_entry_norm', 'BBP_entry',
+                    'RSI_exit', 'ATR_exit_norm', 'MACD_exit_norm', 'MACDsig_exit_norm', 'BBP_exit'
+                ])
                 df.to_csv(f"{pair}_log.csv", index=False)
 
                 total = ctx['total_wins'] + ctx['total_losses']
                 win_rate = (ctx['total_wins'] / total * 100) if total else 0
-
                 avg_mae_winners = df.loc[df['Result'] == 'WIN', 'Max Drawdown (R)'].mean() if not df.empty else 0
                 avg_mfe_losers = df.loc[df['Result'] == 'LOSS', 'Max Profit (R)'].mean() if not df.empty else 0
 
-                # ✅ New clean format (patched for backward compatibility)
                 print(f'\n== {pair} BACKTEST SUMMARY ==')
                 if ctx['last_triggered_trade']:
                     t = ctx['last_triggered_trade']
