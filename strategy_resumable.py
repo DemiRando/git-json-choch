@@ -3,6 +3,7 @@ import pandas as pd
 import json
 import os
 from emailer import send_email
+import math
 
 print(">>> NEW STRATEGY VERSION LOADED")
 
@@ -11,6 +12,123 @@ def state_path(pair: str) -> str:
     state_dir = os.path.join(os.path.dirname(__file__), "state")
     os.makedirs(state_dir, exist_ok=True)
     return os.path.join(state_dir, f"{pair}_state.json")
+
+
+# -------------------------------
+# Indicator update functions (resumable)
+# -------------------------------
+
+def sma_update(state, value, period):
+    buf = state.get("buf", [])
+    buf.append(value)
+    if len(buf) > period:
+        buf.pop(0)
+    state["buf"] = buf
+    sma_val = sum(buf) / len(buf) if buf else float("nan")
+    return sma_val, state
+
+def ema_update(state, value, period):
+    k = 2 / (period + 1)
+    prev = state.get("ema", value)
+    ema_val = prev + k * (value - prev)
+    state["ema"] = ema_val
+    return ema_val, state
+
+def rsi_update(state, value, period=14):
+    prev_close = state.get("prev_close")
+    if prev_close is None:
+        state["prev_close"] = value
+        state["avg_gain"] = 0.0
+        state["avg_loss"] = 0.0
+        return float("nan"), state
+    change = value - prev_close
+    gain = max(change, 0)
+    loss = -min(change, 0)
+    avg_gain = (state.get("avg_gain", 0) * (period - 1) + gain) / period
+    avg_loss = (state.get("avg_loss", 0) * (period - 1) + loss) / period
+    state["avg_gain"] = avg_gain
+    state["avg_loss"] = avg_loss
+    state["prev_close"] = value
+    if avg_loss == 0:
+        rsi_val = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        rsi_val = 100 - (100 / (1 + rs))
+    return rsi_val, state
+
+def atr_update(state, high, low, close, period=14):
+    prev_close = state.get("prev_close", close)
+    tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+    atr_prev = state.get("atr", tr)
+    atr_val = (atr_prev * (period - 1) + tr) / period
+    state["atr"] = atr_val
+    state["prev_close"] = close
+    return atr_val, state
+
+def macd_update(state, value, fast=12, slow=26, signal=9):
+    ema_fast, fast_state = ema_update(state.get("fast", {}), value, fast)
+    ema_slow, slow_state = ema_update(state.get("slow", {}), value, slow)
+    macd_val = ema_fast - ema_slow
+    signal_val, sig_state = ema_update(state.get("signal", {}), macd_val, signal)
+    state["fast"] = fast_state
+    state["slow"] = slow_state
+    state["signal"] = sig_state
+    state["macd"] = macd_val
+    state["signal_val"] = signal_val
+    return (macd_val, signal_val), state
+
+def bb_update(state, value, period=20, devfactor=2):
+    buf = state.get("buf", [])
+    buf.append(value)
+    if len(buf) > period:
+        buf.pop(0)
+    state["buf"] = buf
+    if len(buf) < period:
+        return (float("nan"), float("nan")), state
+    mean = sum(buf) / len(buf)
+    variance = sum((x - mean) ** 2 for x in buf) / len(buf)
+    std = math.sqrt(variance)
+    upper = mean + devfactor * std
+    lower = mean - devfactor * std
+    return (upper, lower), state
+
+def adx_update(state, high, low, close, period=14):
+    # Wilder's true smoothing version
+    prev_high = state.get("prev_high", high)
+    prev_low = state.get("prev_low", low)
+    prev_close = state.get("prev_close", close)
+
+    up_move = high - prev_high
+    down_move = prev_low - low
+    plus_dm = up_move if (up_move > down_move and up_move > 0) else 0
+    minus_dm = down_move if (down_move > up_move and down_move > 0) else 0
+
+    tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+
+    # Wilder’s smoothing for TR, +DM, -DM
+    smoothed_tr = state.get("smoothed_tr", tr)
+    smoothed_plus_dm = state.get("smoothed_plus_dm", plus_dm)
+    smoothed_minus_dm = state.get("smoothed_minus_dm", minus_dm)
+
+    smoothed_tr = smoothed_tr - (smoothed_tr / period) + tr
+    smoothed_plus_dm = smoothed_plus_dm - (smoothed_plus_dm / period) + plus_dm
+    smoothed_minus_dm = smoothed_minus_dm - (smoothed_minus_dm / period) + minus_dm
+
+    plus_di = 100 * (smoothed_plus_dm / smoothed_tr) if smoothed_tr else 0
+    minus_di = 100 * (smoothed_minus_dm / smoothed_tr) if smoothed_tr else 0
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) else 0
+
+    adx_prev = state.get("adx", dx)
+    adx_val = (adx_prev * (period - 1) + dx) / period
+
+    state.update({
+        "prev_high": high, "prev_low": low, "prev_close": close,
+        "smoothed_tr": smoothed_tr,
+        "smoothed_plus_dm": smoothed_plus_dm,
+        "smoothed_minus_dm": smoothed_minus_dm,
+        "adx": adx_val
+    })
+    return adx_val, state
 
 
 class MasterCHOCHStrategy(bt.Strategy):
@@ -42,8 +160,10 @@ class MasterCHOCHStrategy(bt.Strategy):
         self.show_queued_alerts = True
         self.data_ctx = {}
 
-        # --- indicators per data feed (keeps richer entry-filter logic) ---
+        # keep self.inds for compatibility with existing code structure (left intentionally empty
+        # because we now use resumable indicator state functions instead of Backtrader indicator objects)
         self.inds = {}
+
         for d in self.datas:
             name = d._name
 
@@ -54,6 +174,7 @@ class MasterCHOCHStrategy(bt.Strategy):
                     state = json.load(f)
                 print(f">>> Restored state for {name} from {state_file}")
             else:
+                # include indicator persistent states so resumability works
                 state = {
                     'highs': [], 'lows': [], 'pending_swings': [],
                     'trade_active': False, 'queued_trade': None,
@@ -64,20 +185,17 @@ class MasterCHOCHStrategy(bt.Strategy):
                     'latest_event': None,
                     'email_status': None,
                     'email_error': None,
-                    'last_triggered_trade': None
+                    'last_triggered_trade': None,
+                    # indicator states (resumable)
+                    'sma50': {}, 'sma200': {}, 'ema20': {}, 'rsi': {}, 'macd': {},
+                    'atr': {}, 'bb': {}, 'adx': {}
                 }
 
-            # attach indicators for the feed (mirrors local logic)
-            self.inds[d] = dict(
-                sma50=bt.indicators.SMA(d.close, period=50),
-                sma200=bt.indicators.SMA(d.close, period=200),
-                ema20=bt.indicators.EMA(d.close, period=20),
-                rsi=bt.indicators.RSI(d.close, period=14),
-                macd=bt.indicators.MACD(d.close),
-                atr=bt.indicators.ATR(d, period=14),
-                bb=bt.indicators.BollingerBands(d.close, period=20, devfactor=2),
-                adx=bt.indicators.ADX(d, period=14),
-            )
+            # NOTE: previously we instantiated Backtrader indicator objects here.
+            # To escape resumability limitations we now rely on the resumable indicator
+            # update functions above and store their states in data_ctx (see capture_indicators).
+            # self.inds[d] is intentionally left as an empty dict for compatibility.
+            self.inds[d] = {}
 
             self.data_ctx[name] = state
 
@@ -132,46 +250,30 @@ class MasterCHOCHStrategy(bt.Strategy):
         ctx['pending_swings'] = updated
 
     def capture_indicators(self, data):
-        """Return normalized indicator snapshot for a given data feed.
-
-        Normalizations:
-          - ATR normalized by close price (atr / price)
-          - MACD and MACD signal normalized by close price
-          - BB %B (between 0 and 1): (close - lower) / (upper - lower)
-          - RSI left as-is (0-100)
-        """
-        i = self.inds[data]
+        # This capture_indicators replaces the old Backtrader-indicator-based version
+        # and uses your resumable indicator-update functions + per-feed state stored in data_ctx.
+        ctx = self.data_ctx[data._name]
         close = float(data.close[0]) if data.close[0] is not None else 0.0
+        high = float(data.high[0]) if data.high[0] is not None else 0.0
+        low = float(data.low[0]) if data.low[0] is not None else 0.0
 
-        # raw pulls (some indicators may be NaN at startup)
-        rsi_v = float(i['rsi'][0]) if i['rsi'][0] is not None else float('nan')
-        atr_v = float(i['atr'][0]) if i['atr'][0] is not None else float('nan')
-        macd_v = float(i['macd'].macd[0]) if i['macd'].macd[0] is not None else float('nan')
-        macdsig_v = float(i['macd'].signal[0]) if i['macd'].signal[0] is not None else float('nan')
+        # update indicators using resumable update functions, storing internal states in ctx
+        sma50_val, ctx['sma50'] = sma_update(ctx.get('sma50', {}), close, 50)
+        sma200_val, ctx['sma200'] = sma_update(ctx.get('sma200', {}), close, 200)
+        ema20_val, ctx['ema20'] = ema_update(ctx.get('ema20', {}), close, 20)
+        rsi_val, ctx['rsi'] = rsi_update(ctx.get('rsi', {}), close, 14)
+        (macd_val, macdsig_val), ctx['macd'] = macd_update(ctx.get('macd', {}), close)
+        atr_val, ctx['atr'] = atr_update(ctx.get('atr', {}), high, low, close, 14)
+        (bb_top, bb_bot), ctx['bb'] = bb_update(ctx.get('bb', {}), close, 20, 2)
+        adx_val, ctx['adx'] = adx_update(ctx.get('adx', {}), high, low, close, 14)
 
-        # bollinger bands
-        try:
-            bb_top = float(i['bb'].top[0])
-            bb_bot = float(i['bb'].bot[0])
-        except Exception:
-            bb_top, bb_bot = float('nan'), float('nan')
+        atr_norm = atr_val / close if close else float("nan")
+        macd_norm = macd_val / close if close else float("nan")
+        macdsig_norm = macdsig_val / close if close else float("nan")
+        bbp = (close - bb_bot) / (bb_top - bb_bot) if (bb_top and bb_bot and bb_top != bb_bot) else float("nan")
 
-        # normalize safely (avoid division by zero)
-        atr_norm = (atr_v / close) if close and pd.notna(atr_v) else float('nan')
-        macd_norm = (macd_v / close) if close and pd.notna(macd_v) else float('nan')
-        macdsig_norm = (macdsig_v / close) if close and pd.notna(macdsig_v) else float('nan')
-
-        bbp = float('nan')
-        if pd.notna(bb_top) and pd.notna(bb_bot) and (bb_top - bb_bot) != 0:
-            bbp = (close - bb_bot) / (bb_top - bb_bot)
-
-        return dict(
-            rsi=rsi_v,
-            atr_norm=atr_norm,
-            macd_norm=macd_norm,
-            macdsig_norm=macdsig_norm,
-            bbp=bbp
-        )
+        return dict(rsi=rsi_val, atr_norm=atr_norm, macd_norm=macd_norm,
+                    macdsig_norm=macdsig_norm, bbp=bbp)
 
     def _passes_entry_filters(self, ind_vals, is_long):
         # Any NaN critical indicator -> reject (conservative)
