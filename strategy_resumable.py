@@ -226,6 +226,18 @@ TP: {q['tp']}"""
                     # snapshot normalized indicators at entry
                     ind_vals = self.capture_indicators(data)
 
+                    # --- NEW: track last triggered trade the same way as previous version ---
+                    ctx['last_triggered_trade'] = {
+                        'entry': q['entry_price'],
+                        'sl': q['sl'],
+                        'tp': q['tp'],
+                        'direction': direction,
+                        'status': 'ONGOING',
+                        'rr': q.get('rr'),
+                        'date': str(data.datetime.datetime(0))
+                    }
+                    ctx['latest_event'] = f"TRIGGERED {direction} {pair} at {q['entry_price']}"
+
                     if self.p.live_mode:
                         self.log(f'TRIGGERED TRADE ALERT:\n{msg}')
                         send_email(f"TRADE ALERT: {direction} {pair}", msg,
@@ -247,6 +259,7 @@ TP: {q['tp']}"""
                         ctx['trade_log'].append(row)
                         self.log(f"TRADE EXECUTED: {direction} {pair} at {q['entry_price']}")
                 else:
+                    ctx['latest_event'] = f"QUEUED {direction} {pair} at {q['entry_price']}"
                     if self.show_queued_alerts and self.p.live_mode:
                         self.log(f'QUEUED TRADE ALERT:\n{msg}')
                         send_email(f"SETUP QUEUED: {direction} {pair}", msg,
@@ -263,9 +276,12 @@ TP: {q['tp']}"""
                 mae_R = ctx['max_adverse'] / ctx['risk_R'] if ctx['risk_R'] else 0
                 mfe_R = ctx['max_favorable'] / ctx['risk_R'] if ctx['risk_R'] else 0
 
-                # TP hit
                 if (ctx['is_long'] and price >= ctx['tp']) or (not ctx['is_long'] and price <= ctx['tp']):
                     ctx['total_wins'] += 1
+                    # update last trade info for summary
+                    if ctx.get('last_triggered_trade'):
+                        ctx['last_triggered_trade']['status'] = 'WIN'
+                        ctx['last_triggered_trade']['exit_date'] = str(data.datetime.datetime(0))
                     if not self.p.live_mode:
                         ind_vals = self.capture_indicators(data)  # snapshot indicators at exit
                         # update last trade row with exit time, result and MAE/MFE and exit indicators
@@ -278,11 +294,15 @@ TP: {q['tp']}"""
                             ]
                         self.close(data=data)
                     ctx['trade_active'] = False
+                    ctx['latest_event'] = f"TP HIT {pair}"
                     self.log(f"{pair} TP HIT")
 
-                # SL hit
                 elif (ctx['is_long'] and price <= ctx['sl']) or (not ctx['is_long'] and price >= ctx['sl']):
                     ctx['total_losses'] += 1
+                    # update last trade info for summary
+                    if ctx.get('last_triggered_trade'):
+                        ctx['last_triggered_trade']['status'] = 'LOSS'
+                        ctx['last_triggered_trade']['exit_date'] = str(data.datetime.datetime(0))
                     if not self.p.live_mode:
                         ind_vals = self.capture_indicators(data)  # snapshot indicators at exit
                         if ctx['trade_log']:
@@ -294,6 +314,7 @@ TP: {q['tp']}"""
                             ]
                         self.close(data=data)
                     ctx['trade_active'] = False
+                    ctx['latest_event'] = f"SL HIT {pair}"
                     self.log(f"{pair} SL HIT")
                 continue
 
@@ -395,6 +416,8 @@ TP: {q['tp']}"""
                     print(f"Direction: {t.get('direction', 'N/A')}")
                     print(f"Entry: {t.get('entry')} | SL: {t.get('sl')} | TP: {t.get('tp')}")
                     print(f"Date: {t.get('date', '(not recorded)')}")
+                    if 'exit_date' in t:
+                        print(f"Exit Date: {t['exit_date']}")
                 else:
                     print("No triggered trades in this run.")
                 print(f"Trades: {total}, Wins: {ctx['total_wins']}, Losses: {ctx['total_losses']}, Win Rate: {win_rate:.2f}%")
