@@ -45,7 +45,7 @@ def state_path(symbol):
     return os.path.join(STATE_DIR, f"{symbol}_state.json")
 
 def load_state_last_dt(symbol):
-    """Load last trade datetime from state JSON if available."""
+    """Load last trade exit datetime from state JSON if available."""
     state_file = state_path(symbol)
     if not os.path.exists(state_file):
         return None
@@ -55,11 +55,31 @@ def load_state_last_dt(symbol):
         log = state.get('trade_log', [])
         if not log:
             return None
-        # Force tz-aware datetime in UTC
-        return datetime.strptime(log[-1][0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        # Use exit time if available, else entry time
+        last_trade = log[-1]
+        exit_time_str = last_trade[1]  # Assuming [0]=entry, [1]=exit
+        last_dt = exit_time_str or last_trade[0]
+        return datetime.strptime(last_dt, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
     except Exception as e:
         print(f"{symbol}: Error loading state: {e}")
         return None
+
+def update_state_with_exit(symbol, exit_time_str):
+    """Update the last trade's exit time in the JSON state."""
+    state_file = state_path(symbol)
+    if not os.path.exists(state_file):
+        return
+    try:
+        with open(state_file, 'r') as f:
+            state = json.load(f)
+        log = state.get('trade_log', [])
+        if log:
+            log[-1][1] = exit_time_str  # Update exit time
+            state['trade_log'] = log
+            with open(state_file, 'w') as f:
+                json.dump(state, f)
+    except Exception as e:
+        print(f"{symbol}: Error updating exit time in state: {e}")
 
 def fetch_dukas_to_temp(symbol):
     """Fetch candles into a temporary CSV for either bootstrap or resume mode."""
@@ -71,7 +91,7 @@ def fetch_dukas_to_temp(symbol):
         end_dt = BOOTSTRAP_END
         print(f"{symbol}: No state found, fetching FULL range {start_dt} → {end_dt}")
     else:
-        # Resume mode — fetch from last trade datetime
+        # Resume mode — fetch from last trade exit datetime
         start_dt = state_dt
         end_dt = datetime.now(UTC)
         print(f"{symbol}: Resuming from {start_dt} → {end_dt}")
@@ -160,4 +180,4 @@ if __name__ == "__main__":
             os.remove(tf)
             print(f"Deleted temp file {tf}")
         except Exception as e:
-            print(f"Failed to delete {tf}: {e}")
+            print(f"Failed to delete {tf}")
